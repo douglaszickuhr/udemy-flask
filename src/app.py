@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_restful import Api, Resource
 from pymongo import MongoClient
+from bcrypt import hashpw, gensalt
 
 app = Flask(__name__)
 api = Api(app)
@@ -8,169 +9,140 @@ api = Api(app)
 client = MongoClient("mongodb://mongo:27017",
                      username='root',
                      password='example')
-db = client.myNewDB
-user_num = db["user_num"]
 
-user_num.insert_one({
-    'num_of_users': 0
-})
+db = client.sentences_database
+users = db["users"]
 
-class Visit(Resource):
-    def get(self):
-        prev_num = user_num.find({})[0]['num_of_users']
-        return jsonify({'users':prev_num})
+"""
+Resources           Route       Method      Param               Response
+Register User       /register   POST        Username/Pwd        200 - OK
 
-    def post(self):
-        prev_num = user_num.find({})[0]['num_of_users']
-        new_num = prev_num + 1
-        user_num.update({},{'$set':{'num_of_users':new_num}})
-        return jsonify({'users':new_num})
+Store Sentence      /store      POST        User/Pwd/sentence   200 - OK
+                                                                301 - Out of Tokens
+                                                                302 - Invalid Password
 
+Retrieve Sentence   /get        GET         User/Pwd            200 - OK
+                                                                301 - Out of Tokens
+                                                                302 - Invalid Password
+"""
 
-def check_posted_data(data, function_name):
-    if function_name == 'divide':
-        if int(data['y']) == 0:
-            return 302, 'Division by 0'
-        else:
-            return [200]
+def hash_pwd(pwd):
+    return hashpw(pwd.encode('utf8'),gensalt())
 
-    if 'x' not in data or 'y' not in data:
-        return 301, 'Missing number'
+def validate_user(user,pwd):
+    hashed_pwd = users.find({'username':user})[0]['password']
+
+    if hashed_pwd == hashpw(pwd.encode('utf8'), hashed_pwd):
+        return True
     else:
-        return [200]
+        return False
 
+def user_tokens(user):
+    return users.find({'username':user})[0]['tokens']
 
-
-class Add(Resource):
+class Register(Resource):
     def post(self):
-        # Get posted data
         data = request.get_json()
 
-        # Pre-check the status
-        status = check_posted_data(data, 'add')
+        username = data['username']
+        password = hash_pwd(data['password'])
 
-        # Validate response
-        if status[0] != 200:
-            ret_json = {
-                'message': status[1],
-                'status': status[0]
-            }
-            return jsonify(ret_json)
-
-        # Extract from list
-        x = int(data['x'])
-        y = int(data['y'])
-
-        # Calculate
-        ret = x + y
-
-        # Build response
+        users.insert_one({'username':username,
+                          'password':password,
+                          'sentences':"",
+                          'tokens':5})
         ret_json = {
-            'message': ret,
+            'message': 'User Created',
             'status': 200
         }
-
         return jsonify(ret_json)
 
-class Subtract(Resource):
+class Store(Resource):
     def post(self):
-        # Get posted data
         data = request.get_json()
 
-        # Pre-check the status
-        status = check_posted_data(data, 'subtract')
+        username = data['username']
+        password = data['password']
+        sentence = data['sentence']
 
-        # Validate response
-        if status[0] != 200:
-            ret_json = {
-                'message': status[1],
-                'status': status[0]
-            }
-            return jsonify(ret_json)
+        if not validate_user(username, password):
+            return jsonify({'message':'Invalid User',
+                            'status':301})
 
-        # Extract from list
-        x = int(data['x'])
-        y = int(data['y'])
+        operation_cost = 1
+        tokens = user_tokens(username)
 
-        # Calculate
-        ret = x - y
+        if tokens < operation_cost:
+            return jsonify({'message':'Insuficient tokens',
+                            'status':302})
 
-        # Build response
-        ret_json = {
-            'message': ret,
-            'status': 200
-        }
+        users.update({'username':username},
+                     {'$set':{
+                        'sentences':sentence,
+                        'tokens':tokens-1
+                     }}
+        )
 
-        return jsonify(ret_json)
+        return jsonify({'message':'Sentence Stored',
+                        'status' : 200})
 
-
-class Multiply(Resource):
-    def post(self):
-        # Get posted data
+class Token(Resource):
+    def get(self):
         data = request.get_json()
+        username = data['username']
+        password = data['password']
 
-        # Pre-check the status
-        status = check_posted_data(data, 'multiply')
+        if not validate_user(username, password):
+            return jsonify({'message':'Invalid User',
+                            'status':301})
 
-        # Validate response
-        if status[0] != 200:
-            ret_json = {
-                'message': status[1],
-                'status': status[0]
-            }
-            return jsonify(ret_json)
+        tokens = user_tokens(username)
 
-        # Extract from list
-        x = int(data['x'])
-        y = int(data['y'])
+        return jsonify({'message':str(tokens),
+                        'status':200})
 
-        # Calculate
-        ret = x * y
-
-        # Build response
-        ret_json = {
-            'message': ret,
-            'status': 200
-        }
-
-        return jsonify(ret_json)
-
-class Divide(Resource):
     def post(self):
-        # Get posted data
         data = request.get_json()
+        username = data['username']
+        password = data['password']
+        new_tokens = int(data['tokens'])
 
-        # Pre-check the status
-        status = check_posted_data(data, 'divide')
+        if not validate_user(username, password):
+            return jsonify({'message':'Invalid User',
+                            'status':301})
 
-        # Validate response
-        if status[0] != 200:
-            ret_json = {
-                'message': status[1],
-                'status': status[0]
-            }
-            return jsonify(ret_json)
+        tokens = user_tokens(username)
 
-        # Extract from list
-        x = int(data['x'])
-        y = int(data['y'])
+        users.update({'username':username},
+                     {'$set':{
+                        'tokens':tokens+new_tokens
+                     }}
+        )
 
-        # Calculate
-        ret = x / y
+        return jsonify({'message':str(tokens+new_tokens),
+                        'status':200})
 
-        # Build response
-        ret_json = {
-            'message': ret,
-            'status': 200
-        }
+class Sentence(Resource):
+    def post(self):
+        data = request.get_json()
+        username = data['username']
+        password = data['password']
 
-        return jsonify(ret_json)
+        if not validate_user(username, password):
+            return jsonify({'message':'Invalid User',
+                            'status':301})
 
-api.add_resource(Add, "/add")
-api.add_resource(Subtract, "/subtract")
-api.add_resource(Multiply, "/multiply")
-api.add_resource(Divide, "/divide")
-api.add_resource(Visit, "/visit")
+        sentence = users.find({'username':username})[0]['sentences']
+
+        return jsonify({'message':sentence,
+                       'status':200})
+
+
+
+api.add_resource(Register,'/register')
+api.add_resource(Store,'/store')
+api.add_resource(Token,'/token')
+api.add_resource(Sentence,'/sentence')
 
 if __name__ == '__main__':
     app.run(debug=True,host='0.0.0.0')
